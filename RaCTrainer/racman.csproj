@@ -246,12 +246,7 @@
     <Compile Include="MemoryForm.Designer.cs">
       <DependentUpon>MemoryForm.cs</DependentUpon>
     </Compile>
-    <Compile Include="RAC4\FormAutosplitter.cs">
-      <SubType>Form</SubType>
-    </Compile>
-    <Compile Include="RAC4\FormAutosplitter.Designer.cs">
-      <DependentUpon>FormAutosplitter.cs</DependentUpon>
-    </Compile>
+    <Compile Include="RAC4\RAC4AutosplitterClient.cs" />
     <Compile Include="RAC4\RAC4BotsUnlocks.cs">
       <SubType>Form</SubType>
     </Compile>
@@ -388,12 +383,7 @@
     <Compile Include="TOD\TODForm.cs">
       <SubType>Form</SubType>
     </Compile>
-    <Compile Include="TOD\ToDAutosplitterForm.cs">
-      <SubType>Form</SubType>
-    </Compile>
-    <Compile Include="TOD\ToDAutosplitterForm.Designer.cs">
-      <DependentUpon>ToDAutosplitterForm.cs</DependentUpon>
-    </Compile>
+    <Compile Include="TOD\ToDAutosplitterClient.cs" />
     <Compile Include="TOD\TODForm.Designer.cs">
       <DependentUpon>TODForm.cs</DependentUpon>
     </Compile>
@@ -468,9 +458,6 @@
     <EmbeddedResource Include="RAC3\SavefileLoader.resx">
       <DependentUpon>SavefileLoader.cs</DependentUpon>
     </EmbeddedResource>
-    <EmbeddedResource Include="RAC4\FormAutosplitter.resx">
-      <DependentUpon>FormAutosplitter.cs</DependentUpon>
-    </EmbeddedResource>
     <EmbeddedResource Include="RAC4\RAC4BotsUnlocks.resx">
       <DependentUpon>RAC4BotsUnlocks.cs</DependentUpon>
     </EmbeddedResource>
@@ -543,9 +530,6 @@
     </EmbeddedResource>
     <EmbeddedResource Include="TOD\TODForm.resx">
       <DependentUpon>TODForm.cs</DependentUpon>
-    </EmbeddedResource>
-    <EmbeddedResource Include="TOD\ToDAutosplitterForm.resx">
-      <DependentUpon>ToDAutosplitterForm.cs</DependentUpon>
     </EmbeddedResource>
     <EmbeddedResource Include="TOD\WeaponForm.resx">
       <DependentUpon>WeaponForm.cs</DependentUpon>

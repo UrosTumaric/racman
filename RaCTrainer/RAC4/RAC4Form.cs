@@ -4,8 +4,6 @@ using System.Linq;
 using System.Text;
 using System.Windows.Forms;
 using Timer = System.Windows.Forms.Timer;
-using System.Net.Http;
-using System.Threading;
 using racman.RAC4;
 
 namespace racman
@@ -61,12 +59,17 @@ namespace racman
 
         private int savefileHelperSubID = -1;
         private int tutorialSubId = -1;
-        private int quittingGameSubId = -1;
         private int loadPlanetSubID = -1;
         private uint prevGameMode;
         // Tutorial flag - are we loading a fresh file?
         public byte prevTutorial;
-        private bool isStartingAutosplitter;
+        private readonly object memorySubscriptionsLock = new object();
+        private RAC4AutosplitterClient autosplitterClient;
+        private bool memorySubscriptionsActive;
+        private int memorySubscriptionGeneration;
+        private bool softlockFixEnabled;
+        private bool ghostRatchetEnabled;
+        private bool freezeHealthEnabled;
 
         WebMAN wmm = null;
 
@@ -75,6 +78,8 @@ namespace racman
             this.game = game;
 
             game.SetupInputDisplayMemorySubs();
+            memorySubscriptionsActive = true;
+            memorySubscriptionGeneration = 1;
 
             InitializeComponent();
             planets_comboBox.Text = "DreadZone";
@@ -90,7 +95,7 @@ namespace racman
             }
         }
 
-        public Form InputDisplay;
+        public InputDisplay InputDisplay;
         public static string ip = AttachPS3Form.ip;
         public static int pid = AttachPS3Form.pid;
         public static uint SaveInfo = 0x11B1BD8;
@@ -102,40 +107,317 @@ namespace racman
 
         private void RAC4Form_Load(object sender, EventArgs e)
         {
+            softlockFixEnabled = true;
             checkBoxSoftlocks.Checked = true;
+            SetupFormMemorySubscriptions();
+        }
 
-            savefileHelperSubID = game.api.SubMemory(game.api.getCurrentPID(), rac4.addr.savefile_api_enabled, 1, value =>
+        private void SetupFormMemorySubscriptions()
+        {
+            lock (memorySubscriptionsLock)
             {
-                if (value[0] == 1)
+                if (!memorySubscriptionsActive)
+                    return;
+
+                SetupSavefileHelperSubscription();
+                SetupLoadPlanetSubscription();
+                SetupSoftlockSubscription();
+            }
+        }
+
+        private void SetupSavefileHelperSubscription()
+        {
+            if (savefileHelperSubID != -1)
+                return;
+
+            int currentPid = game.pid;
+            int generation = memorySubscriptionGeneration;
+
+            savefileHelperSubID = game.api.SubMemory(
+                currentPid,
+                rac4.addr.savefile_api_enabled,
+                1,
+                value =>
                 {
-                    this.Invoke(new Action(() =>
+                    if (value[0] != 1)
+                        return;
+
+                    InvokeOnForm(() =>
                     {
-                        // Savefile helper mod is enabled.
-                        loadFileButton.Enabled = true;
-                        setAsideFileButton.Enabled = true;
-                        game.api.ReleaseSubID(savefileHelperSubID);
-                        savefileHelperSubID = -1;
-                    }));
-                }
-            });
+                        lock (memorySubscriptionsLock)
+                        {
+                            if (!memorySubscriptionsActive ||
+                                generation != memorySubscriptionGeneration)
+                            {
+                                return;
+                            }
 
-            // Watch gameMode for the duration of the form. The load planet button turns
-            // fast loads on; when gameMode leaves GAME_MODE_SPACE (load finished) we set
-            // fast loads back to whatever the checkbox says.
-            loadPlanetSubID = game.api.SubMemory(game.api.getCurrentPID(), rac4.addr.gamestate + 3, 1, IPS3API.MemoryCondition.Changed, value =>
-            {
-                byte gameMode = value[0];
-                if (gameMode == prevGameMode) return;
+                            loadFileButton.Enabled = true;
+                            setAsideFileButton.Enabled = true;
 
-                bool loadFinished = prevGameMode == GAME_MODE_SPACE && gameMode != GAME_MODE_SPACE;
-                prevGameMode = gameMode;
+                            if (savefileHelperSubID != -1)
+                            {
+                                game.api.ReleaseSubID(savefileHelperSubID);
+                                savefileHelperSubID = -1;
+                            }
+                        }
+                    });
+                });
+        }
 
-                if (loadFinished)
+        private void SetupLoadPlanetSubscription()
+        {
+            if (loadPlanetSubID != -1)
+                return;
+
+            int currentPid = game.pid;
+            int generation = memorySubscriptionGeneration;
+            prevGameMode = 0;
+
+            // The load planet button temporarily enables fast loads. Restore the
+            // checkbox setting when gameMode leaves GAME_MODE_SPACE.
+            loadPlanetSubID = game.api.SubMemory(
+                currentPid,
+                rac4.addr.gamestate + 3,
+                1,
+                IPS3API.MemoryCondition.Changed,
+                value =>
                 {
-                    Console.WriteLine("!!!! yes");
-                    this.Invoke(new Action(() => enableDisableFastLoads(checkBoxFastLoads.Checked)));
+                    bool loadFinished;
+
+                    lock (memorySubscriptionsLock)
+                    {
+                        if (!memorySubscriptionsActive ||
+                            generation != memorySubscriptionGeneration)
+                        {
+                            return;
+                        }
+
+                        byte gameMode = value[0];
+                        if (gameMode == prevGameMode)
+                            return;
+
+                        loadFinished =
+                            prevGameMode == GAME_MODE_SPACE &&
+                            gameMode != GAME_MODE_SPACE;
+                        prevGameMode = gameMode;
+                    }
+
+                    if (loadFinished)
+                    {
+                        InvokeOnForm(() =>
+                        {
+                            lock (memorySubscriptionsLock)
+                            {
+                                if (!memorySubscriptionsActive ||
+                                    generation != memorySubscriptionGeneration)
+                                {
+                                    return;
+                                }
+
+                                enableDisableFastLoads(checkBoxFastLoads.Checked);
+                            }
+                        });
+                    }
+                });
+        }
+
+        private void SetupSoftlockSubscription()
+        {
+            if (!softlockFixEnabled || tutorialSubId != -1)
+                return;
+
+            int currentPid = game.pid;
+            int generation = memorySubscriptionGeneration;
+            prevTutorial = byte.MaxValue;
+
+            tutorialSubId = game.api.SubMemory(
+                currentPid,
+                rac4.addr.tutorialFlags + 3,
+                1,
+                value =>
+                {
+                    lock (memorySubscriptionsLock)
+                    {
+                        if (!memorySubscriptionsActive ||
+                            generation != memorySubscriptionGeneration)
+                        {
+                            return;
+                        }
+
+                        byte tutorial = value[0];
+                        if (tutorial == prevTutorial)
+                            return;
+
+                        prevTutorial = tutorial;
+                        if (tutorial == 0)
+                        {
+                            game.api.WriteMemory(
+                                currentPid,
+                                rac4.addr.qualifierSoftlock,
+                                new byte[] { 0 });
+                        }
+                    }
+                });
+        }
+
+        private void TeardownMemorySubscriptions()
+        {
+            lock (memorySubscriptionsLock)
+            {
+                if (!memorySubscriptionsActive)
+                    return;
+
+                memorySubscriptionsActive = false;
+                memorySubscriptionGeneration++;
+
+                try
+                {
+                    ReleaseFreezeSubscriptions();
+
+                    if (game.api is Ratchetron ratchetron)
+                    {
+                        ratchetron.ReleaseAllSubs();
+                    }
+                    else
+                    {
+                        ReleaseKnownSubscription(tutorialSubId);
+                        ReleaseKnownSubscription(savefileHelperSubID);
+                        ReleaseKnownSubscription(loadPlanetSubID);
+                    }
                 }
-            });
+                finally
+                {
+                    tutorialSubId = -1;
+                    savefileHelperSubID = -1;
+                    loadPlanetSubID = -1;
+                }
+            }
+        }
+
+        private void RestoreMemorySubscriptions()
+        {
+            lock (memorySubscriptionsLock)
+            {
+                if (memorySubscriptionsActive)
+                    return;
+
+                game.pid = game.api.getCurrentPID();
+                pid = game.pid;
+                AttachPS3Form.pid = game.pid;
+                memorySubscriptionsActive = true;
+                memorySubscriptionGeneration++;
+
+                int generation = memorySubscriptionGeneration;
+                InvokeOnForm(() =>
+                {
+                    lock (memorySubscriptionsLock)
+                    {
+                        if (!memorySubscriptionsActive ||
+                            generation != memorySubscriptionGeneration)
+                        {
+                            return;
+                        }
+
+                        loadFileButton.Enabled = false;
+                        setAsideFileButton.Enabled = false;
+                    }
+                });
+
+                try
+                {
+                    game.SetupInputDisplayMemorySubs();
+                    SetupSavefileHelperSubscription();
+                    SetupLoadPlanetSubscription();
+                    SetupSoftlockSubscription();
+
+                    if (ghostRatchetEnabled)
+                        game.SetGhostRatchet(true);
+
+                    if (freezeHealthEnabled)
+                    {
+                        healthFreezeSubID = game.api.FreezeMemory(
+                            game.pid,
+                            rac4.addr.playerHealth,
+                            200);
+                    }
+                }
+                catch
+                {
+                    memorySubscriptionsActive = false;
+                    memorySubscriptionGeneration++;
+
+                    try
+                    {
+                        ReleaseFreezeSubscriptions();
+
+                        if (game.api is Ratchetron ratchetron)
+                            ratchetron.ReleaseAllSubs();
+                    }
+                    finally
+                    {
+                        tutorialSubId = -1;
+                        savefileHelperSubID = -1;
+                        loadPlanetSubID = -1;
+                    }
+
+                    throw;
+                }
+            }
+        }
+
+        private void ReleaseFreezeSubscriptions()
+        {
+            if (ghostRatchetEnabled)
+            {
+                try
+                {
+                    game.SetGhostRatchet(false);
+                }
+                catch
+                {
+                    // The old process may already be gone.
+                }
+            }
+
+            if (healthFreezeSubID != -1)
+            {
+                ReleaseKnownSubscription(healthFreezeSubID);
+                healthFreezeSubID = -1;
+            }
+        }
+
+        private void ReleaseKnownSubscription(int subscriptionId)
+        {
+            if (subscriptionId == -1)
+                return;
+
+            try
+            {
+                game.api.ReleaseSubID(subscriptionId);
+            }
+            catch
+            {
+                // The process or data channel may already be gone.
+            }
+        }
+
+        private void InvokeOnForm(Action action)
+        {
+            if (IsDisposed)
+                return;
+
+            try
+            {
+                if (InvokeRequired)
+                    BeginInvoke(action);
+                else
+                    action();
+            }
+            catch (InvalidOperationException)
+            {
+                // The form was disposed before the callback could run.
+            }
         }
 
         private async void wrsFromSrcSiteCheck_CheckedChanged(object sender, EventArgs e)
@@ -222,31 +504,50 @@ namespace racman
 
         private void RAC4Form_FormClosing(object sender, FormClosingEventArgs e)
         {
-            writetext.Checked = false;
-            try 
-            {
-                if (tutorialSubId != -1)
-                    game.api.ReleaseSubID(tutorialSubId);
-                if (savefileHelperSubID != -1)
-                    game.api.ReleaseSubID(savefileHelperSubID);
-                if (loadPlanetSubID != -1)
-                    game.api.ReleaseSubID(loadPlanetSubID);
-                if (game.api is Ratchetron r)
-                    r.ReleaseAllSubs();
+            CloseConnections();
+            Application.Exit();
+        }
 
-                game.api.Disconnect();
-                if (!isStartingAutosplitter)
-                    Application.Exit();
-            } 
+        private void CloseConnections()
+        {
+            writetext.Checked = false;
+
+            if (autosplitterClient != null)
+            {
+                autosplitterClient.Dispose();
+                autosplitterClient = null;
+            }
+
+            StopLegacyAutosplitter();
+
+            try
+            {
+                TeardownMemorySubscriptions();
+            }
             catch
             {
-                // lol
+                // The process or network connection may already be gone.
+            }
+
+            try
+            {
+                game.api.Disconnect();
+            }
+            catch
+            {
+                // The network connection may already be closed.
             }
         }
 
         private void ghostcheck_CheckedChanged(object sender, EventArgs e)
         {
-            game.SetGhostRatchet(ghostcheck.Checked);
+            ghostRatchetEnabled = ghostcheck.Checked;
+
+            lock (memorySubscriptionsLock)
+            {
+                if (memorySubscriptionsActive)
+                    game.SetGhostRatchet(ghostRatchetEnabled);
+            }
         }
 
         private void planets_comboBox_SelectedIndexChanged(object sender, EventArgs e)
@@ -339,9 +640,7 @@ namespace racman
         {
             if (!AutosplitterCheckbox.Checked)
             {
-                // Disable autosplitter.
-                autosplitterHelper.Stop();
-                autosplitterHelper = null;
+                StopLegacyAutosplitter();
             }
             else
             {
@@ -352,27 +651,42 @@ namespace racman
             }
         }
 
+        private void StopLegacyAutosplitter()
+        {
+            if (autosplitterHelper == null)
+                return;
+
+            try
+            {
+                if (autosplitterHelper.IsRunning)
+                    autosplitterHelper.Stop();
+            }
+            catch
+            {
+                // Its subscriptions may already have been released on game exit.
+            }
+
+            autosplitterHelper = null;
+        }
+
         private void checkBoxSoftlocks_CheckedChanged(object sender, EventArgs e)
         {
-            var api = game.api;
-            var pid = api.getCurrentPID();
+            softlockFixEnabled = checkBoxSoftlocks.Checked;
 
-            if (checkBoxSoftlocks.Checked)
+            lock (memorySubscriptionsLock)
             {
-                api.SubMemory(pid, rac4.addr.tutorialFlags + 3, 1, (value) =>
+                if (!memorySubscriptionsActive)
+                    return;
+
+                if (softlockFixEnabled)
                 {
-                    var tutorial = value[0];
-                    if (tutorial == prevTutorial) return;
-                    prevTutorial = tutorial;
-
-                    if (tutorial == 0)
-                        api.WriteMemory(pid, rac4.addr.qualifierSoftlock, new byte[] { 0 });
-                });
-            }
-            else if (tutorialSubId != -1)
-            {
-                api.ReleaseSubID(tutorialSubId);
-                tutorialSubId = -1;
+                    SetupSoftlockSubscription();
+                }
+                else if (tutorialSubId != -1)
+                {
+                    ReleaseKnownSubscription(tutorialSubId);
+                    tutorialSubId = -1;
+                }
             }
         }
 
@@ -468,6 +782,7 @@ namespace racman
         private void switchGameToolStripMenuItem_Click(object sender, EventArgs e)
         {
             FormClosing -= RAC4Form_FormClosing;
+            CloseConnections();
             Program.AttachPS3Form.Show();
             Close();
         }
@@ -477,14 +792,26 @@ namespace racman
         // I couldn't get this to work, he just dies - isak
         private void freezeHealthCheckbox_CheckedChanged(object sender, EventArgs e)
         {
-            if (freezeHealthCheckbox.Checked)
+            freezeHealthEnabled = freezeHealthCheckbox.Checked;
+
+            lock (memorySubscriptionsLock)
             {
-                // It puts Ratchet to 0 and makes it invencible, idk why 200 tbh
-                healthFreezeSubID = game.api.FreezeMemory(game.api.getCurrentPID(), rac4.addr.playerHealth, 200);
-            }
-            else
-            {
-                game.api.ReleaseSubID(healthFreezeSubID);
+                if (!memorySubscriptionsActive)
+                    return;
+
+                if (freezeHealthEnabled)
+                {
+                    // It puts Ratchet to 0 and makes it invencible, idk why 200 tbh
+                    healthFreezeSubID = game.api.FreezeMemory(
+                        game.pid,
+                        rac4.addr.playerHealth,
+                        200);
+                }
+                else if (healthFreezeSubID != -1)
+                {
+                    ReleaseKnownSubscription(healthFreezeSubID);
+                    healthFreezeSubID = -1;
+                }
             }
         }
 
@@ -614,22 +941,79 @@ namespace racman
 
         private void buttonStartLCSplitter_Click(object sender, EventArgs e)
         {
-            if (game.api is Ratchetron r)
+            if (game.api is Ratchetron)
             {
-                // Disconnect everthing else, start autosplitter SPRX, and open that form
-                this.isStartingAutosplitter = true;
-                this.Close();
+                bool legacyAutosplitterWasEnabled = AutosplitterCheckbox.Checked;
 
-                func.PrepareSPRX(ip, "rac4-autosplitter.sprx", 5);
+                try
+                {
+                    func.PrepareSPRX(ip, "rac4-autosplitter.sprx", 5);
 
-                FormAutosplitter autosplitterForm = new FormAutosplitter(ip);
-                autosplitterForm.Show();
+                    if (AutosplitterCheckbox.Checked)
+                        AutosplitterCheckbox.Checked = false;
+
+                    // CheckedChanged normally stops it, but call this explicitly
+                    // as well so the any% bridge can never overlap a stale helper.
+                    StopLegacyAutosplitter();
+                    AutosplitterCheckbox.Enabled = false;
+
+                    autosplitterClient = new RAC4AutosplitterClient(
+                        ip,
+                        TeardownMemorySubscriptions,
+                        RestoreMemorySubscriptions,
+                        AutosplitterClient_Disconnected);
+
+                    buttonStartLCSplitter.Text = "Autosplitter enabled";
+                    buttonStartLCSplitter.Enabled = false;
+                }
+                catch (Exception ex)
+                {
+                    if (autosplitterClient != null)
+                    {
+                        autosplitterClient.Dispose();
+                        autosplitterClient = null;
+                    }
+
+                    AutosplitterCheckbox.Enabled = true;
+                    if (legacyAutosplitterWasEnabled &&
+                        !AutosplitterCheckbox.Checked)
+                    {
+                        AutosplitterCheckbox.Checked = true;
+                    }
+
+                    MessageBox.Show(
+                        "Failed to start autosplitter:\n" + ex.Message,
+                        "Autosplitter Error",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Error);
+                }
             }
             else
             {
                 MessageBox.Show("Autosplitter not supported on RPCS3", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
-           
+        }
+
+        private void AutosplitterClient_Disconnected()
+        {
+            InvokeOnForm(() =>
+            {
+                buttonStartLCSplitter.Text = "Reconnect Autosplitter";
+                buttonStartLCSplitter.Enabled = true;
+
+                if (autosplitterClient != null)
+                {
+                    autosplitterClient.Dispose();
+                    autosplitterClient = null;
+                }
+
+                MessageBox.Show(
+                    this,
+                    "The connection to the PS3 autosplitter was lost.",
+                    "Autosplitter Disconnected",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+            });
         }
 
         private void checkBoxRefillAmmo_CheckedChanged(object sender, EventArgs e)

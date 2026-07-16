@@ -13,10 +13,11 @@ namespace racman.TOD
     public partial class TODForm : Form
     {
         static ModLoaderForm modLoaderForm;
-        public Form InputDisplay;
+        public InputDisplay InputDisplay;
         public tod game;
 
-        private bool isStartingAutosplitter;
+        private ToDAutosplitterClient autosplitterClient;
+        private volatile bool inputSubscriptionsActive;
         public Form ConfigureCombos;
 
         public TODForm(tod game)
@@ -27,6 +28,7 @@ namespace racman.TOD
             if (this.game.HasInputDisplay)
             {
                 this.game.SetupInputDisplayMemorySubs();
+                inputSubscriptionsActive = true;
             }
         }
 
@@ -65,9 +67,14 @@ namespace racman.TOD
 
         private void TODForm_FormClosing(object sender, FormClosingEventArgs e)
         {
+            if (autosplitterClient != null)
+            {
+                autosplitterClient.Dispose();
+                autosplitterClient = null;
+            }
+
             game.api.Disconnect();
-            if (!isStartingAutosplitter)
-                Application.Exit();
+            Application.Exit();
         }
 
         private void buttonStartAutosplitter_Click(object sender, EventArgs e)
@@ -82,28 +89,40 @@ namespace racman.TOD
              * var choiceForm = new CategoryChoiceForm();
              * choiceForm.ShowDialog();
              * ...
-             */
+            */
             if (game.api is Ratchetron)
             {
-                isStartingAutosplitter = true;
-                Close();
-
                 try
                 {
                     func.PrepareSPRX(AttachPS3Form.ip, "tod-autosplitter.sprx", 5);
 
-                    ToDAutosplitterForm autosplitterForm =
-                        new ToDAutosplitterForm(AttachPS3Form.ip);
-                    autosplitterForm.Show();
+                    autosplitterClient =
+                        new ToDAutosplitterClient(
+                            AttachPS3Form.ip,
+                            game,
+                            inputSubscriptionsActive,
+                            InputSubscriptionStateChanged,
+                            AutosplitterClient_Disconnected);
+
+                    labelAutosplitterStatus.Text = "Autosplitter enabled!";
+                    labelAutosplitterStatus.ForeColor = Color.Green;
+                    labelSplitterRoute.Visible = false;
+                    buttonStartAutosplitter.Text = "Autosplitter enabled";
+                    buttonStartAutosplitter.Enabled = false;
                 }
                 catch (Exception ex)
                 {
+                    if (autosplitterClient != null)
+                    {
+                        autosplitterClient.Dispose();
+                        autosplitterClient = null;
+                    }
+
                     MessageBox.Show(
                         "Failed to start autosplitter:\n" + ex.Message,
                         "Autosplitter Error",
                         MessageBoxButtons.OK,
                         MessageBoxIcon.Error);
-                    Application.Exit();
                 }
             }
             else
@@ -114,6 +133,45 @@ namespace racman.TOD
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
             }
+        }
+
+        private void AutosplitterClient_Disconnected()
+        {
+            try
+            {
+                BeginInvoke(new Action(() =>
+                {
+                    if (IsDisposed)
+                        return;
+
+                    labelAutosplitterStatus.Text = "Autosplitter disconnected.";
+                    labelAutosplitterStatus.ForeColor = Color.Red;
+                    buttonStartAutosplitter.Text = "Reconnect Autosplitter";
+                    buttonStartAutosplitter.Enabled = true;
+
+                    if (autosplitterClient != null)
+                    {
+                        autosplitterClient.Dispose();
+                        autosplitterClient = null;
+                    }
+
+                    MessageBox.Show(
+                        this,
+                        "The connection to the PS3 autosplitter was lost.",
+                        "Autosplitter Disconnected",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Warning);
+                }));
+            }
+            catch (InvalidOperationException)
+            {
+                // The form was disposed before the notification could run.
+            }
+        }
+
+        private void InputSubscriptionStateChanged(bool active)
+        {
+            inputSubscriptionsActive = active;
         }
 
         private void DieButtonClick(object sender, EventArgs e)
