@@ -189,39 +189,46 @@ namespace racman.TOD
 
         private void buttonStartAutosplitter_Click(object sender, EventArgs e)
         {
-            var choiceForm = new CategoryChoiceForm();
-            choiceForm.ShowDialog();
-
-            if (choiceForm.route is ASSRoute route)
+            /*
+             * The old autosplitter asked which ASS/GASS route was being used,
+             * then disconnected its memory subscriptions around autoscrollers.
+             * The SPRX autosplitter now survives game exits itself, and split
+             * route filtering is handled by LiveSplit, so that flow is no
+             * longer needed.
+             *
+             * var choiceForm = new CategoryChoiceForm();
+             * choiceForm.ShowDialog();
+             * ...
+             */
+            try
             {
-                useAutosplitter = true;
-                autosplitterASSroute = route;
-                setupDisconnectSubs();
-
-                Console.WriteLine("Autosplitter starting!");
-                autosplitter = new AutosplitterHelper();
-                autosplitter.StartAutosplitterForGame(this.game);
+                if (!StartAutosplitterClient())
+                    return;
 
                 labelAutosplitterStatus.Text = "Autosplitter enabled!";
                 labelAutosplitterStatus.ForeColor = Color.Green;
-
-                setAutosplitterLabel();
-                buttonStartAutosplitter.Text = "Configure Autosplitter";
-                buttonStartAutosplitter.Click -= buttonStartAutosplitter_Click;
-                buttonStartAutosplitter.Click += buttonReselectAutosplitter_Click;
+                labelSplitterRoute.Visible = false;
+                buttonStartAutosplitter.Text = "Autosplitter enabled";
+                buttonStartAutosplitter.Enabled = false;
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(
+                    "Failed to start autosplitter:\n" + ex.Message,
+                    "Autosplitter Error",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
             }
         }
 
-        private void buttonReselectAutosplitter_Click(object sender, EventArgs e) 
+        protected virtual bool StartAutosplitterClient()
         {
-            var choiceForm = new CategoryChoiceForm();
-            choiceForm.ShowDialog();
-
-            if (choiceForm.route is ASSRoute route)
-            {
-                autosplitterASSroute = route;
-                setAutosplitterLabel();
-            }
+            MessageBox.Show(
+                "This form does not provide the SPRX autosplitter client.",
+                "Autosplitter Error",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
+            return false;
         }
 
         private void DieButtonClick(object sender, EventArgs e)

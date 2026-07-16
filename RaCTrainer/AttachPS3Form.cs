@@ -248,7 +248,7 @@ namespace racman
             {
                 Hide();
                 func.api.Notify("RaCMAN connected!");
-                TODForm tod = new TODForm(new tod(func.api));
+                TODForm tod = new ToDAutosplitterForm(new tod(func.api));
                 gameName = "ToD PAL";
                 tod.ShowDialog();
             }
