@@ -389,8 +389,10 @@
       <SubType>Form</SubType>
     </Compile>
     <Compile Include="TOD\ToDAutosplitterForm.cs">
-      <DependentUpon>TODForm.cs</DependentUpon>
       <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="TOD\ToDAutosplitterForm.Designer.cs">
+      <DependentUpon>ToDAutosplitterForm.cs</DependentUpon>
     </Compile>
     <Compile Include="TOD\TODForm.Designer.cs">
       <DependentUpon>TODForm.cs</DependentUpon>
@@ -541,6 +543,9 @@
     </EmbeddedResource>
     <EmbeddedResource Include="TOD\TODForm.resx">
       <DependentUpon>TODForm.cs</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Include="TOD\ToDAutosplitterForm.resx">
+      <DependentUpon>ToDAutosplitterForm.cs</DependentUpon>
     </EmbeddedResource>
     <EmbeddedResource Include="TOD\WeaponForm.resx">
       <DependentUpon>WeaponForm.cs</DependentUpon>

@@ -12,17 +12,11 @@ namespace racman.TOD
 {
     public partial class TODForm : Form
     {
-        AutosplitterHelper autosplitter;
         static ModLoaderForm modLoaderForm;
         public Form InputDisplay;
         public tod game;
 
-        private int disconnectSubId = -1;
-        private bool useAutosplitter = false;
-        private bool hasSmuggled = false;
-        private ASSRoute? autosplitterASSroute;
-        private byte lastPlanet;
-        private byte lastGoodPlanet;
+        private bool isStartingAutosplitter;
         public Form ConfigureCombos;
 
         public TODForm(tod game)
@@ -30,98 +24,10 @@ namespace racman.TOD
             this.game = game;
             InitializeComponent();
 
-            if (game.api is Ratchetron r)
-            {
-                // r.setDisconnectCallback(() =>
-                // {
-                //     game.api.Disconnect();
-                // });
-
-                r.setReconnectCallback(() =>
-                {
-                    
-
-                    if (useAutosplitter)
-                    {
-                        System.Threading.Thread.Sleep(8000);
-                        autosplitter.Reconnect();
-                        setupDisconnectSubs();
-                        
-                        game.api.Notify("Autosplitter reconnected!");
-                    }
-                });
-            }
-
             if (this.game.HasInputDisplay)
             {
                 this.game.SetupInputDisplayMemorySubs();
             }
-        }
-
-        private bool hasEnteredAutoscroller(byte last, byte curr)
-        {
-            if (last == curr) return false;
-            return curr == 4 || curr == 8 || curr == 13;
-        }
-
-        private bool hasLeftAutoscroller(byte last, byte curr)
-        {
-            if (last == curr) return false;
-
-            var leftAutoscroller = false;
-            leftAutoscroller |= last == 4 && curr != 5;
-            leftAutoscroller |= last == 8 && curr != 9;
-            leftAutoscroller |= last == 13 && curr != 14;
-            return leftAutoscroller;
-        }
-
-        private void setupDisconnectSubs()
-        {
-            var api = game.api;
-            var pid = api.getCurrentPID();
-
-            disconnectSubId = api.SubMemory(pid, tod.addr.currentPlanet, 1, (val) =>
-            {
-                if (autosplitterASSroute == ASSRoute.None) return;
-
-                var currPlanet = val[0];
-                var currGoodPlanet = lastGoodPlanet;
-
-                if (lastPlanet == 0 && currPlanet != 0)
-                    currGoodPlanet = currPlanet;
-
-                if (autosplitterASSroute == ASSRoute.ASS && hasEnteredAutoscroller(lastGoodPlanet, currGoodPlanet))
-                {
-                    handleDisconnect();
-                }
-                // Disconnect if we just left the autoscroller
-                else if (hasLeftAutoscroller(lastGoodPlanet, currGoodPlanet))
-                {
-                    if (autosplitterASSroute == ASSRoute.SmugglingGASS && !hasSmuggled)
-                        hasSmuggled = true;
-                    else
-                        handleDisconnect();
-                }
-
-
-                lastPlanet = currPlanet;
-                lastGoodPlanet = currGoodPlanet;
-            });
-        }
-
-        private void handleDisconnect()
-        {
-            // Void memory subs
-            game.api.ReleaseSubID(disconnectSubId);
-
-            // Reset planet state
-            hasSmuggled = false;
-            lastPlanet = 0;
-            lastGoodPlanet = 0;
-
-            // Disconnect autosplitter subs
-            autosplitter?.Stop();
-            game.api.Notify("Autosplitter disconnected");
         }
 
         private void patchLoaderToolStripMenuItem_Click(object sender, EventArgs e)
@@ -159,32 +65,9 @@ namespace racman.TOD
 
         private void TODForm_FormClosing(object sender, FormClosingEventArgs e)
         {
-            if (autosplitter != null && autosplitter.IsRunning)
-                autosplitter?.Stop();
-            autosplitter = null;
-
             game.api.Disconnect();
-            Application.Exit();
-        }
-
-        private void setAutosplitterLabel()
-        {
-            labelSplitterRoute.Visible = true;
-            switch (autosplitterASSroute)
-            {
-                case ASSRoute.None:
-                    labelSplitterRoute.Text = "No ASS/GASS";
-                    break;
-                case ASSRoute.ASS:
-                    labelSplitterRoute.Text = "Old ASS";
-                    break;
-                case ASSRoute.GASS:
-                    labelSplitterRoute.Text = "GASS";
-                    break;
-                case ASSRoute.SmugglingGASS:
-                    labelSplitterRoute.Text = "GASS with smuggling";
-                    break;
-            }
+            if (!isStartingAutosplitter)
+                Application.Exit();
         }
 
         private void buttonStartAutosplitter_Click(object sender, EventArgs e)
@@ -200,35 +83,37 @@ namespace racman.TOD
              * choiceForm.ShowDialog();
              * ...
              */
-            try
+            if (game.api is Ratchetron)
             {
-                if (!StartAutosplitterClient())
-                    return;
+                isStartingAutosplitter = true;
+                Close();
 
-                labelAutosplitterStatus.Text = "Autosplitter enabled!";
-                labelAutosplitterStatus.ForeColor = Color.Green;
-                labelSplitterRoute.Visible = false;
-                buttonStartAutosplitter.Text = "Autosplitter enabled";
-                buttonStartAutosplitter.Enabled = false;
+                try
+                {
+                    func.PrepareSPRX(AttachPS3Form.ip, "tod-autosplitter.sprx", 5);
+
+                    ToDAutosplitterForm autosplitterForm =
+                        new ToDAutosplitterForm(AttachPS3Form.ip);
+                    autosplitterForm.Show();
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(
+                        "Failed to start autosplitter:\n" + ex.Message,
+                        "Autosplitter Error",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Error);
+                    Application.Exit();
+                }
             }
-            catch (Exception ex)
+            else
             {
                 MessageBox.Show(
-                    "Failed to start autosplitter:\n" + ex.Message,
+                    "SPRX autosplitter is not supported on RPCS3.",
                     "Autosplitter Error",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
             }
-        }
-
-        protected virtual bool StartAutosplitterClient()
-        {
-            MessageBox.Show(
-                "This form does not provide the SPRX autosplitter client.",
-                "Autosplitter Error",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Error);
-            return false;
         }
 
         private void DieButtonClick(object sender, EventArgs e)

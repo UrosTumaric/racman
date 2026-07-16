@@ -3,10 +3,11 @@ using System.IO;
 using System.IO.MemoryMappedFiles;
 using System.Net.Sockets;
 using System.Threading;
+using System.Windows.Forms;
 
 namespace racman.TOD
 {
-    public class ToDAutosplitterForm : TODForm
+    public partial class ToDAutosplitterForm : Form
     {
         private enum SplitterCommand
         {
@@ -19,7 +20,6 @@ namespace racman.TOD
         private const int AutosplitterPort = 9672;
         private const int AutosplitterMmfSize = 256;
         private const string AutosplitterMmfName = "racman-autosplitter-lc";
-        private const string AutosplitterSprxName = "tod-autosplitter.sprx";
 
         private readonly object writerLock = new object();
 
@@ -27,74 +27,67 @@ namespace racman.TOD
         private MemoryMappedViewStream mmfStream;
         private BinaryWriter writer;
 
-        private TcpClient autosplitterClient;
-        private NetworkStream autosplitterStream;
+        private TcpClient client;
+        private NetworkStream stream;
         private Thread dataThread;
         private volatile bool stopping;
+        private int disconnectPopupShown;
 
-        public ToDAutosplitterForm(tod game)
-            : base(game)
+        public ToDAutosplitterForm(string ip)
         {
-        }
+            InitializeComponent();
 
-        protected override bool StartAutosplitterClient()
-        {
-            if (!(game.api is Ratchetron))
-            {
-                System.Windows.Forms.MessageBox.Show(
-                    "SPRX autosplitter is not supported on RPCS3.",
-                    "Autosplitter Error",
-                    System.Windows.Forms.MessageBoxButtons.OK,
-                    System.Windows.Forms.MessageBoxIcon.Error);
-                return false;
-            }
-
-            if (dataThread != null)
-                return true;
-
-            func.PrepareSPRX(AttachPS3Form.ip, AutosplitterSprxName, 5);
-
-            mmfFile = MemoryMappedFile.CreateOrOpen(AutosplitterMmfName, AutosplitterMmfSize);
+            mmfFile = MemoryMappedFile.CreateOrOpen(
+                AutosplitterMmfName,
+                AutosplitterMmfSize);
             mmfStream = mmfFile.CreateViewStream();
             writer = new BinaryWriter(mmfStream);
 
             // command, paused, planet
             WriteAutosplitterValues(new byte[] { 0, 0, 0 });
 
-            autosplitterClient = new TcpClient(AttachPS3Form.ip, AutosplitterPort);
-            autosplitterClient.NoDelay = true;
-            autosplitterStream = autosplitterClient.GetStream();
+            client = new TcpClient(ip, AutosplitterPort);
+            client.NoDelay = true;
+            stream = client.GetStream();
 
-            stopping = false;
-            dataThread = new Thread(ManageAutosplitterConnection);
+            dataThread = new Thread(ManageConnection);
             dataThread.IsBackground = true;
             dataThread.Name = "ToD Autosplitter";
             dataThread.Start();
-
-            return true;
         }
 
-        private void ManageAutosplitterConnection()
+        private void ManageConnection()
         {
+            bool disconnectedUnexpectedly = false;
+
             try
             {
                 while (!stopping)
                 {
-                    int commandValue = autosplitterStream.ReadByte();
+                    int commandValue = stream.ReadByte();
                     if (commandValue == -1)
+                    {
+                        disconnectedUnexpectedly = true;
                         break;
+                    }
 
-                    int packetValue = autosplitterStream.ReadByte();
+                    int packetValue = stream.ReadByte();
                     if (packetValue == -1)
+                    {
+                        disconnectedUnexpectedly = true;
                         break;
+                    }
 
                     // Confirm receipt after both protocol bytes have arrived.
-                    autosplitterStream.WriteByte(1);
+                    stream.WriteByte(1);
 
                     byte command = (byte)commandValue;
                     byte packet = (byte)packetValue;
 
-                    Console.WriteLine("Got autosplitter command: {0} & packet: {1}", command, packet);
+                    Console.WriteLine(
+                        "Got autosplitter command: {0} & packet: {1}",
+                        command,
+                        packet);
 
                     switch ((SplitterCommand)command)
                     {
@@ -117,16 +110,54 @@ namespace racman.TOD
             catch (IOException)
             {
                 if (!stopping)
+                {
                     Console.WriteLine("ToD autosplitter connection closed.");
+                    disconnectedUnexpectedly = true;
+                }
             }
             catch (SocketException)
             {
                 if (!stopping)
+                {
                     Console.WriteLine("ToD autosplitter socket disconnected.");
+                    disconnectedUnexpectedly = true;
+                }
             }
             catch (ObjectDisposedException)
             {
                 // Expected when the form closes while the thread is reading.
+            }
+            finally
+            {
+                if (disconnectedUnexpectedly && !stopping)
+                    ShowDisconnectPopup();
+            }
+        }
+
+        private void ShowDisconnectPopup()
+        {
+            if (Interlocked.Exchange(ref disconnectPopupShown, 1) != 0)
+                return;
+
+            try
+            {
+                BeginInvoke(new Action(() =>
+                {
+                    if (stopping || IsDisposed)
+                        return;
+
+                    labelStatus.Text = "Autosplitter disconnected.";
+                    MessageBox.Show(
+                        this,
+                        "The connection to the PS3 autosplitter was lost.",
+                        "Autosplitter Disconnected",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Warning);
+                }));
+            }
+            catch (InvalidOperationException)
+            {
+                // The form was disposed before the UI notification could run.
             }
         }
 
@@ -160,12 +191,17 @@ namespace racman.TOD
             }
         }
 
-        private void StopAutosplitterClient()
+        private void buttonClose_Click(object sender, EventArgs e)
+        {
+            Close();
+        }
+
+        private void StopAutosplitter()
         {
             stopping = true;
 
-            autosplitterStream?.Close();
-            autosplitterClient?.Close();
+            stream?.Close();
+            client?.Close();
 
             if (dataThread != null &&
                 dataThread != Thread.CurrentThread &&
@@ -186,15 +222,17 @@ namespace racman.TOD
                 mmfFile = null;
             }
 
-            autosplitterStream = null;
-            autosplitterClient = null;
+            stream = null;
+            client = null;
             dataThread = null;
         }
 
-        protected override void OnFormClosing(System.Windows.Forms.FormClosingEventArgs e)
+        private void ToDAutosplitterForm_FormClosing(
+            object sender,
+            FormClosingEventArgs e)
         {
-            StopAutosplitterClient();
-            base.OnFormClosing(e);
+            StopAutosplitter();
+            Application.Exit();
         }
     }
 }
