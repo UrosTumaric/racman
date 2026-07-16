@@ -14,6 +14,9 @@ namespace racman
 {
     public class tod : IGame, IAutosplitterAvailable
     {
+        private const uint NpeaAllocationBasePointer = 0x10740BB4;
+        private const uint NpeaRatchetPointerOffset = 0xC684;
+
         public class ToDAddresses : IAddresses
         {
             public uint savePlanetId;
@@ -125,9 +128,7 @@ namespace racman
             string gameVersion = AttachPS3Form.game;
             if(gameVersion == "NPEA00452")
             {
-                if (!AttachPS3Form.isEmulator)
-                    addr.ratchetPtr = 0x61BF1984; 
-                else addr.ratchetPtr = 0x31BF1984; //Dumb rat alternatives: 310740C00, 334A66EFA, 331C40864, difference to HP: 381E1D2C + 2484 = 758 , 381E28DC - 2484 = 458, 381E0D00 - 2484 =  1784
+                UpdateNpeaRatchetPointerAddress();
 
                 addr.savePlanetId = 0x1029C55B;
                 addr.loadScreenType = 0x102034FB;
@@ -589,7 +590,23 @@ namespace racman
 
         public uint getRatPointer()
         {
+            // The NPEA allocation can move between launches, so resolve the
+            // address containing Ratchet's pointer again before using it.
+            if (AttachPS3Form.game == "NPEA00452")
+                UpdateNpeaRatchetPointerAddress();
+
             return BitConverter.ToUInt32(api.ReadMemory(pid, tod.addr.ratchetPtr, 4).Reverse().ToArray(), 0);
+        }
+
+        private void UpdateNpeaRatchetPointerAddress()
+        {
+            uint allocationBase = BitConverter.ToUInt32(
+                api.ReadMemory(pid, NpeaAllocationBasePointer, 4)
+                    .Reverse()
+                    .ToArray(),
+                0);
+
+            addr.ratchetPtr = allocationBase + NpeaRatchetPointerOffset;
         }
 
         public void PlayerValues(string option, uint value)
