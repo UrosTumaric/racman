@@ -68,8 +68,14 @@ namespace racman.TOD
                 mmfStream = mmfFile.CreateViewStream();
                 writer = new BinaryWriter(mmfStream);
 
-                // command, paused, planet
-                WriteAutosplitterValues(new byte[] { 0, 0, 0 });
+                // command, paused, planet, game status
+                WriteAutosplitterValues(new byte[]
+                {
+                    0,
+                    0,
+                    0,
+                    (byte)GameStatus.InGame,
+                });
 
                 client = new TcpClient(ip, AutosplitterPort);
                 client.NoDelay = true;
@@ -198,6 +204,10 @@ namespace racman.TOD
                     EnableInputSubscriptions();
                     break;
             }
+
+            // Keep game-exit state separate from the loading pause. LiveSplit
+            // uses this transition to apply the reboot penalty.
+            WriteAutosplitterValue(3, (byte)status);
         }
 
         private void EnableInputSubscriptions()

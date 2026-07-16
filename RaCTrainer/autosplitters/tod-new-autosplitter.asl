@@ -26,6 +26,7 @@ init
         current.command = vars.reader.ReadByte();
         current.paused = vars.reader.ReadByte();
         current.planet = vars.reader.ReadByte();
+        current.gameStatus = vars.reader.ReadByte();
     });
     vars.UpdateValues();
 
@@ -149,5 +150,12 @@ split
 
 isLoading
 {
+    // A QuitPending -> InGame transition is a full game reboot. Loading-screen
+    // pauses do not change gameStatus and therefore do not receive a penalty.
+    if (old.gameStatus == 1 && current.gameStatus == 0)
+    {
+        timer.SetGameTime(timer.CurrentTime.GameTime.Value.Add(TimeSpan.FromSeconds(20)));
+    }
+
     return current.paused == 1;
 }
