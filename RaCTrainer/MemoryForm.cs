@@ -40,6 +40,22 @@ namespace racman
             mobyInstancesEndAddr = instancesEnd;
         }
 
+        // Game IDs for which the moby inspector is wired up. Other games get the
+        // inspector force-hidden and the toggle disabled.
+        private static readonly HashSet<string> MobyInspectorSupportedGames = new HashSet<string>
+        {
+            "NPEA00385", // RAC1
+            "NPEA00386", // RAC2
+            "NPEA00387", // RAC3
+            "NPEA00423", // RAC4 (Deadlocked)
+        };
+
+        // Form width when the moby inspector is collapsed — just wide enough for the
+        // watched-addresses pane. Pulled from the designer width of the form when
+        // visible (986 client width).
+        private const int CollapsedClientWidth = 428;
+        private int expandedClientWidth;
+
         public MemoryForm()
         {
             InitializeComponent();
@@ -47,6 +63,78 @@ namespace racman
 
             watchedMemoryAddressesListView.DoubleBuffering(true);
             mobyInspectorListView.DoubleBuffering(true);
+
+            expandedClientWidth = this.ClientSize.Width;
+
+            ApplyMobyInspectorVisibility();
+        }
+
+        // Returns true if the moby inspector should be shown for the current game.
+        // Reads the persisted preference for supported games; always false otherwise.
+        private bool ShouldShowMobyInspector()
+        {
+            if (!MobyInspectorSupportedGames.Contains(AttachPS3Form.game))
+                return false;
+
+            string saved;
+            try { saved = func.GetConfigData("config.txt", "mobyInspectorVisible"); }
+            catch { saved = ""; }
+
+            // Default to shown for supported games when the preference is missing.
+            if (string.IsNullOrEmpty(saved)) return true;
+            return !saved.Equals("false", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private void ApplyMobyInspectorVisibility()
+        {
+            bool supported = MobyInspectorSupportedGames.Contains(AttachPS3Form.game);
+            bool show = supported && ShouldShowMobyInspector();
+
+            mobyInspectorLabel.Visible = show;
+            selectedMobyComboBox.Visible = show;
+            refreshMobysButton.Visible = show;
+            dumpButton.Visible = show;
+            sortByOClassCheckBox.Visible = show;
+            mobyInspectorListView.Visible = show;
+
+            this.ClientSize = new System.Drawing.Size(
+                show ? expandedClientWidth : CollapsedClientWidth,
+                this.ClientSize.Height);
+
+            if (!supported)
+            {
+                toggleMobyInspectorButton.Enabled = false;
+                toggleMobyInspectorButton.Text = "Unsupported for this game";
+            }
+            else
+            {
+                toggleMobyInspectorButton.Enabled = true;
+                toggleMobyInspectorButton.Text = show ? "Hide moby viewer" : "Show moby viewer";
+            }
+        }
+
+        private void toggleMobyInspectorButton_Click(object sender, EventArgs e)
+        {
+            if (!MobyInspectorSupportedGames.Contains(AttachPS3Form.game))
+                return;
+
+            bool currentlyShown = mobyInspectorListView.Visible;
+            bool newShown = !currentlyShown;
+
+            try
+            {
+                // Make sure config.txt exists before ChangeFileLines tries to read it.
+                if (!File.Exists("config.txt"))
+                    File.Create("config.txt").Close();
+
+                func.ChangeFileLines("config.txt", newShown ? "true" : "false", "mobyInspectorVisible");
+            }
+            catch
+            {
+                // Persistence is best-effort; the toggle still works in-session.
+            }
+
+            ApplyMobyInspectorVisibility();
         }
 
         IPS3API api = func.api;
@@ -200,11 +288,14 @@ namespace racman
                     menuStrip.Items.Add("Edit value...");
                     menuStrip.Items[0].Click += MenuStripEditValue_Click;
 
+                    menuStrip.Items.Add("Rename...");
+                    menuStrip.Items[1].Click += MenuStripRename_Click;
+
                     menuStrip.Items.Add("Freeze/unfreeze value");
-                    menuStrip.Items[1].Click += MenuStripEditValue_Freeze;
+                    menuStrip.Items[2].Click += MenuStripEditValue_Freeze;
 
                     menuStrip.Items.Add("Delete");
-                    menuStrip.Items[2].Click += MenuStripDelete_Click;
+                    menuStrip.Items[3].Click += MenuStripDelete_Click;
 
                     menuStrip.Show(Cursor.Position);
 
@@ -258,20 +349,54 @@ namespace racman
 
                     IPS3API api = func.api;
 
-                    SimpleInputDialogForm inputDialog = new SimpleInputDialogForm("Edit value", focusedItem.SubItems[2].Text);
+                    // Build default text: strip the freeze indicator the list view adds,
+                    // and prepend "0x" for hex-represented values so the format is obvious.
+                    string defaultText = focusedItem.SubItems[2].Text;
+                    const string frozenPrefix = "❄: ";
+                    if (defaultText.StartsWith(frozenPrefix))
+                        defaultText = defaultText.Substring(frozenPrefix.Length);
+                    if (watched.hexRepresented && !defaultText.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
+                        defaultText = "0x" + defaultText;
+
+                    SimpleInputDialogForm inputDialog = new SimpleInputDialogForm("Edit value", defaultText);
                     if (inputDialog.ShowDialog() == DialogResult.OK)
                     {
                         try
                         {
+                            string text = inputDialog.inputTextBox.Text.Trim();
+                            bool isHex = text.StartsWith("0x", StringComparison.OrdinalIgnoreCase);
+                            string hexBody = isHex ? text.Substring(2) : null;
+
                             if (watched.isFloat)
                             {
-                                float value = Convert.ToSingle(inputDialog.inputTextBox.Text);
+                                float value;
+                                if (isHex)
+                                {
+                                    // Interpret 0x… as a raw IEEE-754 bit pattern, useful for
+                                    // round-tripping the exact bits shown elsewhere.
+                                    uint bits = UInt32.Parse(hexBody, System.Globalization.NumberStyles.HexNumber);
+                                    value = BitConverter.ToSingle(BitConverter.GetBytes(bits), 0);
+                                }
+                                else
+                                {
+                                    value = Convert.ToSingle(text);
+                                }
 
                                 api.WriteMemory(api.getCurrentPID(), watched.address, watched.size, BitConverter.GetBytes(value).Take((int)watched.size).Reverse().ToArray());
                             }
                             else
                             {
-                                long value = Convert.ToInt64(inputDialog.inputTextBox.Text);
+                                long value;
+                                if (isHex)
+                                {
+                                    // Parse as unsigned so the full width is usable (e.g. 0xFFFFFFFF
+                                    // for a 4-byte field), then reinterpret as signed.
+                                    value = (long)UInt64.Parse(hexBody, System.Globalization.NumberStyles.HexNumber);
+                                }
+                                else
+                                {
+                                    value = Convert.ToInt64(text);
+                                }
 
                                 api.WriteMemory(api.getCurrentPID(), watched.address, watched.size, BitConverter.GetBytes(value).Take((int)watched.size).Reverse().ToArray());
                             }
@@ -282,6 +407,24 @@ namespace racman
                         }
                     }
                 }
+            }
+        }
+
+        private void MenuStripRename_Click(object sender, EventArgs e)
+        {
+            var focusedItem = watchedMemoryAddressesListView.FocusedItem;
+            if (focusedItem == null || focusedItem.Tag == null) return;
+
+            WatchedAddress watched = (WatchedAddress)focusedItem.Tag;
+
+            SimpleInputDialogForm inputDialog = new SimpleInputDialogForm("Rename watch", watched.name);
+            if (inputDialog.ShowDialog() == DialogResult.OK)
+            {
+                string newName = inputDialog.inputTextBox.Text;
+                if (string.IsNullOrWhiteSpace(newName)) return;
+
+                watched.name = newName;
+                focusedItem.Text = newName;
             }
         }
 

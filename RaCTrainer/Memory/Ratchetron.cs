@@ -34,6 +34,7 @@ namespace racman
         private Dictionary<int, Action<byte[]>> memSubCallbacks = new Dictionary<int, Action<byte[]>>();
         private Dictionary<int, uint> memSubTickUpdates = new Dictionary<int, uint>();
         private Dictionary<int, UInt32> frozenAddresses = new Dictionary<int, uint>();
+        private readonly object memorySubsLock = new object();
 
         private Action onDisconnectCallback;
         private Action onReconnectCallback;
@@ -95,8 +96,8 @@ namespace racman
         {
             this.ReleaseAllSubs();
             this.connected = false;
-            this.udpClient.Close();
-            this.client.Close();
+            this.udpClient?.Close();
+            this.client?.Close();
 
             return true;
         }
@@ -256,13 +257,23 @@ namespace racman
                                 UInt32 size = BitConverter.ToUInt32(cmdBuf.Skip(5).Take(4).Reverse().ToArray(), 0);
                                 uint tickUpdated = BitConverter.ToUInt32(cmdBuf.Skip(9).Take(4).Reverse().ToArray(), 0);
                                 var value = cmdBuf.Skip(13).Take((int)size).Reverse().ToArray();
+                                Action<byte[]> callback = null;
 
-                                if (this.memSubTickUpdates.ContainsKey((int)memSubID) && this.memSubTickUpdates[(int)memSubID] != tickUpdated)
+                                lock (memorySubsLock)
                                 {
-                                    this.memSubTickUpdates[(int)memSubID] = tickUpdated;
-                                    this.memSubCallbacks[(int)memSubID](value);
+                                    if (this.memSubTickUpdates.TryGetValue((int)memSubID, out uint previousTick) &&
+                                        previousTick != tickUpdated &&
+                                        this.memSubCallbacks.TryGetValue((int)memSubID, out callback))
+                                    {
+                                        this.memSubTickUpdates[(int)memSubID] = tickUpdated;
+                                    }
+                                    else
+                                    {
+                                        callback = null;
+                                    }
                                 }
 
+                                callback?.Invoke(value);
                                 break;
                             }
                         // for opening/closing: 1 extra byte for coming in/out
@@ -369,9 +380,12 @@ namespace racman
 
             var memSubID = (int)BitConverter.ToInt32(memSubIDBuf.Take(4).Reverse().ToArray(), 0);
 
-            this.memorySubs.Add(memSubID);
-            this.memSubCallbacks[memSubID] = callback;
-            this.memSubTickUpdates[memSubID] = 0;
+            lock (memorySubsLock)
+            {
+                this.memorySubs.Add(memSubID);
+                this.memSubCallbacks[memSubID] = callback;
+                this.memSubTickUpdates[memSubID] = 0;
+            }
 
             Console.WriteLine($"Subscribed to address {address.ToString("X")} with subscription ID {memSubID}");
 
@@ -402,14 +416,22 @@ namespace racman
 
             Console.WriteLine($"Froze address {address.ToString("X")} with subscription ID {memSubID}");
 
-            frozenAddresses[memSubID] = address;
+            lock (memorySubsLock)
+            {
+                frozenAddresses[memSubID] = address;
+            }
 
             return memSubID;
         }
 
         public void ReleaseAllSubs()
         {
-            var allSubsCopy = this.memorySubs.ToArray();
+            int[] allSubsCopy;
+            lock (memorySubsLock)
+            {
+                allSubsCopy = this.memorySubs.ToArray();
+            }
+
             foreach (var sub in allSubsCopy)
             {
                 this.ReleaseSubID(sub);
@@ -432,10 +454,13 @@ namespace racman
                 n_bytes += stream.Read(resultBuf, 0, 1);
             }
 
-            this.memSubCallbacks.Remove(memSubID);
-            this.memSubTickUpdates.Remove(memSubID);
-            this.frozenAddresses.Remove(memSubID);
-            this.memorySubs.Remove(memSubID);
+            lock (memorySubsLock)
+            {
+                this.memSubCallbacks.Remove(memSubID);
+                this.memSubTickUpdates.Remove(memSubID);
+                this.frozenAddresses.Remove(memSubID);
+                this.memorySubs.Remove(memSubID);
+            }
 
             Console.WriteLine($"Released memory subscription ID {memSubID}");
 
@@ -445,11 +470,14 @@ namespace racman
 
         public override int MemSubIDForAddress(uint address)
         {
-            foreach(KeyValuePair<int, uint> entry in frozenAddresses)
+            lock (memorySubsLock)
             {
-                if (address == entry.Value)
+                foreach(KeyValuePair<int, uint> entry in frozenAddresses)
                 {
-                    return entry.Key;
+                    if (address == entry.Value)
+                    {
+                        return entry.Key;
+                    }
                 }
             }
             return -1;
